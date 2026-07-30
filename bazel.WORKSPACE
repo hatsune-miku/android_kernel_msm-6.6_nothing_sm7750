@@ -187,3 +187,13 @@ exports_files([
 """
 
 )
+
+### Reconstructed Nothing project repository ###
+# Nothing's release references @nt_project but never published it.
+# See msm-kernel/nt_project.bzl for the reasoning behind this reconstruction.
+load("//msm-kernel:nt_project.bzl", "nt_project_repository")
+
+nt_project_repository(
+    name = "nt_project",
+    default_product = "FroggerPro",
+)
