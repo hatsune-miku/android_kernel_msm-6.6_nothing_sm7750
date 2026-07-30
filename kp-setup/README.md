@@ -127,6 +127,133 @@ FroggerPro 走 `sun` 目标：`arch/arm64/configs/vendor/sun_perf.config:1-3` �
 `//tools/mkbootimg:gki/testdata/testkey_rsa4096.pem`（AVB **测试**密钥，`:299`），
 所以刷机需要解锁 bootloader 并禁用 verification。
 
+## 状态：已实机验证 ✅
+
+自编 boot.img 已在 Nothing Phone (4a) Pro 上正常启动。
+
+```
+内核     6.6.92-android15-8-maybe-dirty-4k
+lsmod    519（与原厂完全一致）
+KernelSU LKM 正常工作，root 可用
+```
+
+完整流程：
+```bash
+./fetch_deps.sh                                    # 搭环境
+# common/ 切到与设备 uname -r 匹配的 ACK tag（见坑 1）
+# 应用 gki_defconfig-no-sig-protect.patch（见坑 3）
+./build.sh build                                   # 或只编 boot：见下
+./resign_boot.sh <编出的boot.img> <原厂boot.img>    # 见坑 2
+fastboot flash boot <重签后的>.img
+```
+
+只要 boot.img（保留原厂 vendor_dlkm）的话，用这个 target 快得多，
+它只依赖 GKI，不编那 347 个 msm 模块：
+```bash
+./tools/bazel build --noenable_bzlmod //msm-kernel:sun_perf_avb_sign_boot_image
+```
+
+## 刷机排查记录：三个必须处理的坑
+
+自编 boot.img 在这台设备上要能起来，有三处和"直接把编出来的 boot.img 刷进去"不同的地方。
+按发现顺序（也是踩坑顺序）记录。
+
+### 坑 1：GKI 版本要对齐设备固件，不是对齐源码发布
+
+`android/ACK_SHA` 写的是**源码发布**对应的 ACK（`android15-6.6-2025-10_r7` / 6.6.102），
+但设备上跑的 GKI 是另一回事。判据是设备的 `uname -r`：
+
+```
+6.6.92-android15-8-g3637f4904cf5-ab13944661-4k
+                    ^^^^^^^^^^^^  ACK commit   ^^^^^^^^^^ Google CI 构建号
+```
+
+`ab13944661` 说明 Nothing 没自己编 GKI，直接用了 Google 认证的预编译二进制。
+那个 commit 对应 ACK tag `android15-6.6-2025-07_r10`（SUBLEVEL=92）。
+
+对齐方法：
+```bash
+cd kernel_platform/common
+git fetch --depth 1 origin refs/tags/<tag>:refs/tags/<tag>
+git checkout <tag>
+```
+
+注：单靠这一条并不能让设备启动（见坑 3），但版本对齐本身是必要的。
+
+### 坑 2：AVB 元数据是占位值，会被防回滚拒绝
+
+`msm_kernel_la.bzl:300-302` 把 props 硬编码成了占位值，
+`avb_boot_img.bzl` 又根本没传 `--rollback_index`：
+
+|  | 原厂 | 构建产物 |
+|---|---|---|
+| os_version | 15 | **13** |
+| security_patch | 2025-09-05 | **2023-05-05** |
+| rollback index | 1757030400 | **0** |
+
+在 bootloader 看来这是一次从 Android 15 / 2025-09 到 Android 13 / 2023-05 的大降级。
+**AVB 防回滚索引存在 RPMB 里，和 bootloader 是否解锁是两套独立机制**，解锁不会让它放行。
+
+症状：卡在第一屏，进不去，重启后自动进 recovery。
+
+修复：用 `resign_boot.sh` 重签（会自动从原厂镜像读取正确的元数据）。
+```bash
+./resign_boot.sh <编出的 boot.img> <原厂 boot.img>
+```
+
+### 坑 3（真正的拦路虎）：原厂 system_dlkm 模块无法在自编内核上加载
+
+症状：能进到开机动画，`system_server` 起来了，但音频 HAL 永远起不来，
+约 5 分钟后看门狗重启。
+
+诊断的关键是 `lsmod` 对照：自编内核 424 个模块，原厂 519 个，**差的 95 个
+全部是 `/system_dlkm` 里的 GKI 模块**，外加依赖它们的 `btpower`/`cfg80211`/
+`qca_cld3_qca6750` 等。日志里：
+
+```
+E modprobe: Failed to load module /system_dlkm/lib/modules/6lowpan.ko: Permission denied
+init: Service 'gki.modprobe' (pid 409) exited with status 1
+```
+
+`gki.modprobe` 在字母序第一个模块就失败退出，95 个全军覆没。
+
+机制（`common/kernel/module/main.c:1165-1172`）：
+
+```c
+is_vendor_module = !mod->sig_ok;          /* 验签失败 → 当作 vendor 模块 */
+if (is_vendor_module && !is_vendor_exported_symbol &&
+    !gki_is_module_unprotected_symbol(name)) {
+        fsa.sym = ERR_PTR(-EACCES);        /* Permission denied */
+```
+
+原厂 `system_dlkm` 的 GKI 模块由 **Google 的构建密钥**签名，自编内核内嵌的是
+**自己生成的密钥**，验签必然失败 → `sig_ok=0` → 被当成 vendor 模块 →
+它们用的 GKI 内部符号不在 unprotected 列表里 → `-EACCES`。
+
+而真正的 vendor 模块本来就不签名（`sun_perf.config:107` 是
+`# CONFIG_MODULE_SIG_ALL is not set`）且只用 KMI 符号，所以照常加载。
+这正好解释了 424 全过、95 全挂。
+
+两种修法：
+
+**A. 连 system_dlkm 一起替换成自编的**（保留 GKI 符号保护）。
+   构建 `//common:kernel_aarch64_images`，取 `system_dlkm.flatten.erofs.img`
+   （设备用 erofs 挂载），通过 fastbootd 刷进 super 里的逻辑分区。
+   语义上最正确，但要多刷一个分区，恢复也更麻烦。
+
+**B. 关掉 `CONFIG_MODULE_SIG_PROTECT`**（见 `gki_defconfig-no-sig-protect.patch`）。
+   关掉后 `MODULE_SIG_FORCE` 未设置，异签名模块可正常加载。只需重刷 boot.img。
+   代价是放弃 GKI 符号保护——在一台已 root 的个人设备上不构成实质性额外风险。
+
+### 诊断方法论备注
+
+前三次假设（LTS 版本不匹配、ADSP 固件加载失败、SELinux）**全部猜错**，
+每次都是从症状向前推理。真正定位靠的是**对照实验**：在自编内核和原厂内核上
+采集同一组 `dmesg` / `logcat` / `lsmod` / `getprop`，然后 diff。
+`lsmod` 的 424 vs 519 一眼就指出了方向。
+
+以后遇到类似问题，先做对照，别急着推理。
+
 ## 换到另一台机器编译
 
 ### 不要把工作区传到 GitHub
