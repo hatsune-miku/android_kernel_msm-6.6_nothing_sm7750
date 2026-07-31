@@ -1,4 +1,8 @@
-# Nothing Phone (4a) Pro — 可编译 fork
+# Nothing Phone (4a) Pro (FroggerPro) — 可编译 fork
+
+- **ReSukiSU Root (35040) + SuSFS (v2.2.0)**
+- **GKI 6.6.92 (6.6.92-android15-8-g3637f4904cf5-ab13944661-4k)**
+- 理论上兼容 NOS 4.1 后续 OTA，但是我只在自己机器上测试过，我的是 [FroggerPro_B4.1-260323-1635](https://github.com/spike0en/nothing_archive/releases/tag/FroggerPro_B4.1-260323-1635)
 
 > 这是 NothingOSS 官方内核的 fork,补齐了官方漏发布的东西 + 一套可复现的构建脚本,
 > **clone 下来、装好基础工具、跑四条脚本就能编出可刷入的内核**(自编 GKI + 可选
