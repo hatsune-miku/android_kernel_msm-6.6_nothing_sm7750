@@ -1,3 +1,26 @@
+# Nothing Phone (4a) Pro — 可编译 fork
+
+> 这是 NothingOSS 官方内核的 fork,补齐了官方漏发布的东西 + 一套可复现的构建脚本,
+> **clone 下来、装好基础工具、跑四条脚本就能编出可刷入的内核**(自编 GKI + 可选
+> KernelSU/ReSukiSU + SUSFS)。已在真机长期验证。
+>
+> 👉 **构建指南见 [`kp-setup/README.md`](kp-setup/README.md)**
+>
+> 核心修复:复原官方未发布的 `@nt_project` bazel 仓库;其余构建坑(GKI 版本对齐、
+> AVB 重签、system_dlkm 签名、内核版本串等)都在 kp-setup 里脚本化并有详细说明。
+>
+> ```bash
+> cd kp-setup
+> ./fetch_deps.sh      # 搭工作区 + 拉依赖
+> ./apply_patches.sh   # 应用全部内核 patch
+> ./build.sh dist      # 编译
+> ./resign_boot.sh <编出的boot.img> <原厂boot.img>   # AVB 重签
+> ```
+
+---
+
+（以下为 Nothing 官方原始 README，未改动）
+
 # NOTHING Phone (4a) Pro Release Note
  - NOS 4.1(FroggerPro-B4.1-260323-1635)
    - First release opensource of kernel and kernel modules
