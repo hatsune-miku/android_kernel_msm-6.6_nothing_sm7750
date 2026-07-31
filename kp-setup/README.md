@@ -1,27 +1,70 @@
-# Nothing Phone (4a) Pro 内核构建环境复原记录
+# Nothing Phone (4a) Pro — 可编译内核 (KernelSU/ReSukiSU + SUSFS)
 
-把 `NothingOSS/android_kernel_msm-6.6_nothing_sm7750`（分支 `sm7750/b/FroggerPro`）
-恢复到可以编出 `boot.img` 的状态。
+把 Nothing 发布的 `android_kernel_msm-6.6_nothing_sm7750`(分支 `sm7750/b/FroggerPro`)
+从"开箱编不了"整理成"跑四条脚本就能编出一个**已解决全部坑、打好全部 patch** 的
+可刷入内核":自编 GKI + 内建 root + SUSFS + 伪装成原厂版本串。
 
-## 目录布局
+已在真机(Phone 4a Pro,NOS 4.1 FroggerPro)长时间稳定验证。
+
+## 快速开始
+
+前置:一台 x86-64 Linux(建议 ≥16GB RAM),装好 `git`(≥2.27 更稳)、`curl`、
+`tar`、`python3`。编译器/bazel/JDK 全部由脚本拉的 prebuilts 提供,**无需自己装**。
+
+```bash
+git clone -b sm7750/b/FroggerPro-buildable <你的fork> android_kernel_msm-6.6_nothing_sm7750
+cd android_kernel_msm-6.6_nothing_sm7750/kp-setup
+
+./fetch_deps.sh          # 1. 搭 bazel 工作区,拉全部依赖(约 6GB / 10 分钟)
+./apply_patches.sh       # 2. 应用全部内核 patch → 全功能源码树
+./build.sh dist          # 3. 编译(GKI-only 约 17 分钟;完整 dist 约 50 分钟)
+./resign_boot.sh \        # 4. AVB 重签(必须,否则防回滚拒绝,见坑 2)
+    ../kernel_platform/out/msm-kernel-sun-perf/dist/boot.img \
+    ~/boot_stock.img     #    第二个参数 = 从设备 dump 的原厂 boot.img
+
+# 产物: boot-*-resigned.img → fastboot flash boot
+```
+
+⚠️ 三个必须知道的前提:
+- **设备要解锁 bootloader**(用的是 AVB 测试密钥);**永不可重新上锁**,否则变砖。
+- **`DEVICE_ACK_TAG` 要匹配你设备的 `uname -r`**(见坑 1)。本仓库钉的是 6.6.92
+  对应的 tag;OTA 升级后 GKI 版本变了,要改 `apply_patches.sh` 顶部那个变量再重来。
+- **root 管理器**:内核端钉的是 ReSukiSU v4.1.0(版本码 35040),用配套的
+  ReSukiSU 管理器 APK。想换 fork 见"集成 root"一节。
+
+## 仓库文件说明(阅读顺序)
 
 ```
-/home/miku/repo/
-├── android_kernel_msm-6.6_nothing_sm7750/   ← Nothing 发布的 msm-kernel（原始仓库）
-├── kernel_platform/                          ← bazel 工作区（本次搭建）
-│   ├── msm-kernel -> ../android_kernel_msm-6.6_nothing_sm7750   (符号链接)
-│   ├── WORKSPACE  -> msm-kernel/bazel.WORKSPACE
-│   ├── .bazelignore -> msm-kernel/.bazelignore
-│   ├── tools/bazel -> ../build/kernel/kleaf/bazel.sh
-│   ├── build/{kernel,bazel_common_rules,BUILD.bazel,msm_kernel_extensions.bzl}
-│   ├── common/            ← ACK android15-6.6-2025-10_r7
-│   ├── prebuilts/         ← clang-r510928 / build-tools / kernel-build-tools / jdk11 / ndk-r26 ...
-│   ├── external/          ← dtc / bazel 规则 / hermetic 工具链源码依赖
-│   └── out/               ← 构建产物
-└── kp-setup/              ← 本目录：脚本 + 日志
-    ├── fetch_deps.sh      ← 拉取所有依赖（可重复执行）
-    ├── build.sh           ← 构建入口
-    └── *.log
+kp-setup/
+├── README.md                 ← 本文件。先读"快速开始",再按需读下面的坑详解
+├── fetch_deps.sh             ← 步骤1:搭工作区 + 拉依赖(幂等,靠 .done 跳过已完成)
+├── apply_patches.sh          ← 步骤2:应用全部内核 patch(幂等;--revert 可还原)
+├── build.sh                  ← 步骤3:构建入口(内置低内存参数 + --noenable_bzlmod)
+├── resign_boot.sh            ← 步骤4:AVB 重签,元数据自动从原厂 boot 提取
+└── patches/                  ← apply_patches.sh 用到的全部 patch(见下)
+    ├── build-kernel/01-scmversion.patch          坑4:版本串伪装(改 kleaf)
+    ├── common/01-gki_defconfig.patch             坑3+SUSFS:去sig-protect + 开KSU_SUSFS
+    ├── common/02-fs_proc_base_susfs_include.patch susfs 在 6.6.92 上失败的那个 hunk
+    └── common/susfs/                             vendoring 的 susfs4ksu 源(pin 00676ab)
+        ├── 50_add_susfs_in_gki-android15-6.6.patch
+        ├── susfs.c / susfs.h / susfs_def.h
+
+注:坑0(@nt_project 复原)不在 patches/ 里 —— 它改的是 msm-kernel 本身,
+    已直接提交进 fork,clone 下来就带着。见"官方到底漏发布了什么"。
+```
+
+搭好后的工作区布局(供参考,`fetch_deps.sh` 自动建):
+
+```
+<repo父目录>/
+├── android_kernel_msm-6.6_nothing_sm7750/   ← 这个 fork(内含 kp-setup/)
+└── kernel_platform/                          ← bazel 工作区
+    ├── msm-kernel -> ../android_kernel_...    (符号链接回 fork)
+    ├── WORKSPACE / tools/bazel / build/...    (骨架,脚本自动建)
+    ├── common/          ← ACK,apply 后切到设备匹配的 tag + 打 patch + 集成 ReSukiSU
+    ├── build/kernel/    ← kleaf(CodeLinaro 版,见"版本锁定")
+    ├── prebuilts/       ← clang / bazel / jdk / ndk 等(约 6GB)
+    └── out/             ← 构建产物
 ```
 
 ## 官方到底漏发布了什么
@@ -129,33 +172,44 @@ FroggerPro 走 `sun` 目标：`arch/arm64/configs/vendor/sun_perf.config:1-3` �
 
 ## 状态：已实机验证 ✅
 
-自编 boot.img 已在 Nothing Phone (4a) Pro 上正常启动。
+自编 boot.img 已在 Nothing Phone (4a) Pro 上长时间稳定运行（含 root + SUSFS）。
 
 ```
-内核     6.6.92-android15-8-maybe-dirty-4k
+内核     6.6.92-android15-8-g3637f4904cf5-ab13944661-4k   ← 伪装成原厂串（见坑 4）
 lsmod    519（与原厂完全一致）
-KernelSU LKM 正常工作，root 可用
+Root     ReSukiSU 35040（内建，tracepoint hook），与管理器同源
+SUSFS    v2.2.0，SUS_PATH/MOUNT/KSTAT/MAP/SPOOF_UNAME/OPEN_REDIRECT
 ```
 
-完整流程：
+流程见顶部"快速开始"。刷机后的验证清单：
+
 ```bash
-./fetch_deps.sh                                    # 搭环境
-# common/ 切到与设备 uname -r 匹配的 ACK tag（见坑 1）
-# 应用 gki_defconfig-no-sig-protect.patch（见坑 3）
-./build.sh build                                   # 或只编 boot：见下
-./resign_boot.sh <编出的boot.img> <原厂boot.img>    # 见坑 2
-fastboot flash boot <重签后的>.img
+adb shell cat /proc/version                    # 应是伪装的原厂串,无 maybe-dirty
+adb shell su -c 'cat /proc/version'            # su 可用 = root 生效
+adb shell lsmod | wc -l                        # 519 = 原厂 system_dlkm 模块全加载(坑3)
+# 打开 ReSukiSU 管理器,应显示"工作中" v4.1.0 / 35040,内含 SUSFS 图形配置
 ```
 
-只要 boot.img（保留原厂 vendor_dlkm）的话，用这个 target 快得多，
-它只依赖 GKI，不编那 347 个 msm 模块：
-```bash
-./tools/bazel build --noenable_bzlmod //msm-kernel:sun_perf_avb_sign_boot_image
-```
+只想要纯净内核(不带 root/SUSFS)？跳过 `apply_patches.sh` 里的第 4、5 步即可
+(或编 `//msm-kernel:sun_perf_avb_sign_boot_image`,它只依赖 GKI、不编 347 个 msm 模块,
+最快 ~17 分钟)。
 
-## 刷机排查记录：三个必须处理的坑
+---
 
-自编 boot.img 在这台设备上要能起来，有三处和"直接把编出来的 boot.img 刷进去"不同的地方。
+以下是**原理与踩坑详解**,供想理解"为什么"的读者。日常复现只看"快速开始"即可。
+
+## 五个坑一览
+
+| # | 坑 | 表现 | 修复(已脚本化) |
+|---|---|---|---|
+| 0 | `@nt_project` 未发布 | bazel load 阶段就失败 | `nt_project.bzl`,已进 fork |
+| 1 | GKI 版本对错 | 卡开机动画→重启 / 模块 CRC 不符 | `apply_patches.sh` 切设备匹配 tag |
+| 2 | AVB 元数据是占位值 | 卡第一屏,进不去 | `resign_boot.sh` 重签 |
+| 3 | `MODULE_SIG_PROTECT` 挡原厂模块 | 音频等 HAL 起不来,看门狗重启 | `01-gki_defconfig.patch` |
+| 4 | 版本串 `-maybe-dirty` | 暴露自编身份,被检测 | `01-scmversion.patch` 伪装 |
+
+## 刷机排查记录：坑 1~3 详解
+
 按发现顺序（也是踩坑顺序）记录。
 
 ### 坑 1：GKI 版本要对齐设备固件，不是对齐源码发布
@@ -241,7 +295,7 @@ if (is_vendor_module && !is_vendor_exported_symbol &&
    （设备用 erofs 挂载），通过 fastbootd 刷进 super 里的逻辑分区。
    语义上最正确，但要多刷一个分区，恢复也更麻烦。
 
-**B. 关掉 `CONFIG_MODULE_SIG_PROTECT`**（见 `gki_defconfig-no-sig-protect.patch`）。
+**B. 关掉 `CONFIG_MODULE_SIG_PROTECT`**（见 `patches/common/01-gki_defconfig.patch`）。
    关掉后 `MODULE_SIG_FORCE` 未设置，异签名模块可正常加载。只需重刷 boot.img。
    代价是放弃 GKI 符号保护——在一台已 root 的个人设备上不构成实质性额外风险。
 
@@ -253,6 +307,115 @@ if (is_vendor_module && !is_vendor_exported_symbol &&
 `lsmod` 的 424 vs 519 一眼就指出了方向。
 
 以后遇到类似问题，先做对照，别急着推理。
+
+## 坑 4：内核版本串默认是 -maybe-dirty，会暴露自编身份
+
+非 stamp 构建下，kleaf 把 scmversion 硬编码成 `-maybe-dirty`
+（`build/kernel/kleaf/impl/stamp.bzl:62`），`/proc/version`、dmesg banner
+里会明显看出是自编内核，部分检测会据此判定。
+
+版本串构成：`6.6.92`（VERSION.PATCHLEVEL.SUBLEVEL）+ `-android15-8`
+（由 BRANCH + KMI_GENERATION 自动拼）+ scmversion + `-4k`（CONFIG_LOCALVERSION）。
+
+把 `stamp.bzl:62` 的 `echo '-maybe-dirty'` 改成设备原厂 GKI 的 scmversion
+（见 `patches/build-kernel/01-scmversion.patch`）：
+
+```
+stable_scmversion_cmd = "echo '-g3637f4904cf5-ab13944661'"
+```
+
+结果与原厂逐字一致：`6.6.92-android15-8-g3637f4904cf5-ab13944661-4k`。
+其中 `g<sha>` 是 ACK commit（我们编的正是这个 commit，不算伪造），
+`ab<num>` 是 Google CI 构建号。比运行时的 `SPOOF_UNAME` 更彻底——那个只改
+`uname()` 返回值，而 `/proc/version` 等读的是编译期写死的 `linux_banner`。
+
+## 集成 root：ReSukiSU（内建）+ SUSFS
+
+### 为什么是 ReSukiSU，不是 tiann/KernelSU
+
+第一版用了 tiann/KernelSU + susfs4ksu，能编能跑，但有两个硬伤：
+- tiann 官方 3.0.0 后弃用集成（GKI/built-in）模式，转推 LKM——而自编内核走的正是集成模式
+- tiann 对 SUSFS 无官方适配，靠第三方 patch 硬贴
+
+选 fork 的决定性依据是**内核端必须和管理器同源**（否则 prctl 接口错配，管理器认不到内核）。
+设备上已有的管理器是 ReSukiSU v4.1.0，所以内核端就用 `ReSukiSU/ReSukiSU`：
+- 它内核端有多签名白名单（`kernel/manager/apk_sign.c`），默认就认自己的管理器，
+  `KSU_EXPECTED_HASH` 无需手动改
+- SUSFS 有内建兼容层（`kernel/tools/susfs_compat.mk`），会自动探测 hook 方式
+- 集成模式是一等公民，不弃用
+
+### 集成步骤(已由 apply_patches.sh 第 4、5 步自动完成)
+
+脚本做的事,逐条说明(想手动或换 fork 时看)：
+
+1. **克隆到 `common/KernelSU`** —— 必须在 `common/` 内,否则符号链接跳出 bazel 包,取不到源。
+2. **补全 git 历史** —— 版本码 = `30000 + rev-list + 700`,`--depth 1` 会算错;
+   且 `kernel/Kbuild` 构建期会 `fetch --unshallow`(bazel 沙箱内联网必失败)。
+   补全后钉到 `RESUKISU_COMMIT` → 4340 提交 → **35040,与管理器精确一致**。
+3. **接线** —— `drivers/kernelsu` 符号链接 + `drivers/Makefile` + `drivers/Kconfig`。
+4. **SUSFS 内核补丁** —— 只打 susfs4ksu 的**内核那半**(`50_add_susfs`),
+   `fs/proc/base.c` 的 1 个 hunk 因 6.6.92 缺 `dma-buf.h` 上下文失败,
+   由 `02-fs_proc_base_susfs_include.patch` 补上。**KernelSU 那半补丁不打**(ReSukiSU 自带)。
+5. **开 SUSFS** —— `01-gki_defconfig.patch` 里 `CONFIG_KSU_SUSFS=y`(父项默认 n,
+   子项 default y),放在 savedefconfig 规范位置(`CONFIG_LIBNVDIMM` 之后,见 defconfig 定位坑)。
+
+### 想换成别的 root fork？
+
+改 `apply_patches.sh` 顶部的 `RESUKISU_URL` / `RESUKISU_COMMIT`,并确认三件事：
+- **内核端和你的管理器 APK 同源**(这是选 ReSukiSU 而非 tiann 的决定性依据 —— 否则
+  prctl 接口错配,管理器认不到内核)。管理器版本码要和内核 `KSU_VERSION` 对上。
+- 该 fork 是否**自带 SUSFS 兼容层**。ReSukiSU 有(`susfs_compat.mk`),所以只打 susfs
+  的内核半;tiann 没有,两半都要打,还会撞 `-Werror=pointer-bool-conversion`。
+- 版本码公式可能不同(tiann 是 `30000+count`,ReSukiSU 是 `30000+count+700`)。
+
+对比过的三家:**ReSukiSU**(与本机管理器同源,SUSFS 内建,选它)/ **KernelSU-Next**
+(集成模式一等公民、贴近官方,但要另配 Next 管理器)/ **tiann 官方**(弃用集成模式、
+无官方 SUSFS,不推荐)。
+
+### 概念澄清（一开始很容易混）
+
+ReSukiSU 文档把两件事分开，别当成一回事：
+
+| | 谁提供 | 做法 |
+|---|---|---|
+| **Root hook**（拦 su） | ReSukiSU 自带 tracepoint hook | 默认，不改内核源码 |
+| **SUSFS 功能**（隐藏） | simonpunk/susfs4ksu | 打**内核补丁那半** |
+| KernelSU 侧 susfs 适配 | ReSukiSU 内建 susfs_compat.mk | **不打** susfs4ksu 的 KernelSU 补丁 |
+
+对比 tiann：那次两半补丁都要打，还撞上 `-Werror=pointer-bool-conversion`
+（susfs 把 SELinux 符号做成真实函数，KernelSU 判空恒真）。ReSukiSU 的
+`susfs_compat.mk` 自动探测 `ksu_selinux_hide_running` 走 manual hook 分支，避开了它。
+
+### 坑：往 gki_defconfig 加 =y 选项要放对位置
+
+kleaf 的 `savedefconfig` 校验要求 defconfig 逐行匹配它按 Kconfig 菜单顺序生成的
+规范输出。`CONFIG_KSU_SUSFS=y` 放错位置会报 `savedefconfig does not match`，
+即使内容对。做法：先编一次（失败），从 `out/cache/*/common/defconfig` 看它排在哪
+（这里是 `CONFIG_LIBNVDIMM=y` 之后），再放到那个位置。
+
+这是 defconfig 严格校验的两面：
+- **删**默认为 n 的项 → 删整行（不能写 `# ... is not set`），如坑 3 的 MODULE_SIG_PROTECT
+- **加** =y 的项 → 放到 savedefconfig 的规范位置
+
+### 验证清单
+
+```bash
+# 构建日志应有：
+#   -- ReSukiSU version code: 35040        （与管理器一致）
+#   -- ReSukiSU/susfs_feature_check: selinux_hide manual hook found
+#   -- SUSFS_VERSION: v2.2.0
+grep -c '^CONFIG_KSU_SUSFS' out/cache/*/common/.config     # 应为 10
+grep -aoc susfs bazel-bin/common/kernel_aarch64/Image      # 应为 175
+```
+
+刷入后打开 ReSukiSU 管理器，应显示"工作中" v4.1.0 / 35040，内含 SUSFS 图形配置界面。
+
+### init_boot 冲突（LKM 模式遗留）
+
+若设备之前用 LKM 模式 root（`ksuinit` 作为 PID 1 在 init_boot 里），换成内建 root
+后要把 init_boot 恢复原厂，否则两份 KernelSU 抢注册。用 vbmeta 的
+init_boot hash descriptor 精确校验哪个是原厂（本机两槽都被 patch 过，最终从
+第三方原厂镜像站单独下载 init_boot 还原）。
 
 ## 换到另一台机器编译
 

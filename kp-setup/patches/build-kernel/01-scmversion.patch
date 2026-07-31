@@ -1,0 +1,18 @@
+diff --git a/kleaf/impl/stamp.bzl b/kleaf/impl/stamp.bzl
+index 6e6883f..11bc44f 100644
+--- a/kleaf/impl/stamp.bzl
++++ b/kleaf/impl/stamp.bzl
+@@ -59,7 +59,12 @@ def _write_localversion(ctx):
+         stable_scmversion_cmd = _get_status_at_path(ctx, "STABLE_SCMVERSIONS", '"${KERNEL_DIR}"')
+     else:
+         inputs = []
+-        stable_scmversion_cmd = "echo '-maybe-dirty'"
++        # 非 stamp 构建默认输出 "-maybe-dirty"，会明显暴露这是自编内核。
++        # 这里改成设备原厂 GKI 的 scmversion，使最终版本串与原厂逐字一致：
++        #   6.6.92-android15-8-g3637f4904cf5-ab13944661-4k
++        # 其中 g<sha> 是 ACK commit（我们编的就是这个 commit），
++        # ab<num> 是 Google CI 构建号。前缀 "-android15-8" 由下方逻辑自动拼上。
++        stable_scmversion_cmd = "echo '-g3637f4904cf5-ab13944661'"
+ 
+     transitive_inputs = [ctx.attr.env[KernelEnvInfo].inputs]
+     tools = ctx.attr.env[KernelEnvInfo].tools

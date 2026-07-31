@@ -60,7 +60,9 @@ CLO="https://git.codelinaro.org/clo/la"
 # clang 版本从 msm-kernel 自己的配置里读，不写死
 CLANG_VERSION="clang-$(sed -n 's/^CLANG_VERSION=//p' "$MSM_KERNEL/build.config.constants")"
 # ACK 版本从 android/ACK_SHA 第二行（tag）读
-ACK_TAG="$(sed -n 2p "$MSM_KERNEL/android/ACK_SHA" | tr -d '[:space:]')"
+# 默认按 android/ACK_SHA 读(源码发布对应的 ACK)。但设备实际跑的 GKI 版本
+# 可能不同(见 README 坑1),可用 ACK_TAG= 覆盖成设备匹配的 tag,省一次多余下载。
+ACK_TAG="${ACK_TAG:-$(sed -n 2p "$MSM_KERNEL/android/ACK_SHA" | tr -d '[:space:]')}"
 KLEAF_BRANCH="kernel.lnx.6.6.r1-rel"
 KBUILD_REV="main-kernel-build-2024"
 

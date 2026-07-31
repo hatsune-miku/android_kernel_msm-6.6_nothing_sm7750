@@ -1,0 +1,18 @@
+# susfs 的 50_add_susfs 补丁里,fs/proc/base.c 有 1 个 hunk 在 ACK 6.6.92 上会失败:
+# 补丁预期上下文含 `#include <linux/dma-buf.h>`,而 6.6.92 的 base.c 没有这一行。
+# 要插入的内容本身无冲突,这里以 cpufreq_times.h 为锚点单独补上。
+#
+# 应用时机: 在 50_add_susfs_in_gki-android15-6.6.patch 之后(那个补丁会为 base.c
+# 留下一个 .rej,本补丁替代那个失败的 hunk)。
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -100,6 +100,10 @@
+ #include <linux/ksm.h>
+ #include <linux/cpufreq_times.h>
++#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++#include <linux/susfs_def.h>
++#endif // #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
++
+ #include <trace/events/oom.h>
+ #include <trace/hooks/sched.h>
+ #include "internal.h"

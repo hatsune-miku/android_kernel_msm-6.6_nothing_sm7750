@@ -1,4 +1,12 @@
-# 构建/拉取日志，本地产物，不入库
+# 构建/拉取日志、本地产物，不入库
 *.log
 *.log.*
 *.stdout
+.done
+
+# 内核根 .gitignore 有 `*.patch` / `patches` / `patches-*` 规则（Linux 内核树自带），
+# 会把本目录下的 patch 集整个吞掉。这里取反解除，让 patches/ 能被 git 跟踪。
+!*.patch
+!patches
+!patches/
+!patches/**
